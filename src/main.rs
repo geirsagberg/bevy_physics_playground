@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(unused_parens)]
 use std::time::Duration;
 
 use bevy::{prelude::*, time::common_conditions::on_timer};
@@ -16,7 +16,7 @@ fn main() {
         .add_event::<ToolEvent>()
         .add_system(update_ui)
         .add_system(update_placing.before(update_ui))
-        .add_system(spawn_balls.run_if(on_timer(Duration::from_secs_f32(0.1))))
+        .add_system(spawn_balls.run_if(on_timer(Duration::from_secs_f32(0.01))))
         .add_system(despawn_outside_world)
         .add_system(toggle_debug_rendering)
         .add_system(handle_creation_events)
@@ -95,8 +95,8 @@ fn spawn_balls(mut commands: Commands, window_query: Query<&Window>) {
     let width = resolution.width();
     let height = resolution.height();
 
-    let rand_position = Vec2::new(width * (random::<f32>() - 0.5), height * 0.5);
-    let half = 5.;
+    let rand_position = Vec2::new(width * (random::<f32>() - 0.5), height * 0.5 + 100.);
+    let half = 1.;
     commands.spawn((
         RigidBody::Dynamic,
         Collider::ball(half),
@@ -216,6 +216,7 @@ fn update_placing(
 enum Tool {
     Box,
     Delete,
+    ForceField,
 }
 
 struct ToolEvent(Tool);
@@ -249,9 +250,9 @@ fn handle_creation_events(
     mut state: ResMut<State>,
 ) {
     for event in event_reader.iter() {
-        match event.0 {
-            Tool::Box => match *state {
-                State::Default => {
+        match *state {
+            State::Default => match event.0 {
+                Tool::Box => {
                     commands.spawn((
                         Placing,
                         SpriteBundle {
@@ -264,14 +265,24 @@ fn handle_creation_events(
                     ));
                     *state = State::Placing;
                 }
-                _ => {}
-            },
-            Tool::Delete => match *state {
-                State::Default => {
+                Tool::Delete => {
                     *state = State::Selecting(SelectAction::Delete);
                 }
-                _ => {}
+                Tool::ForceField => {
+                    commands.spawn((
+                        Placing,
+                        SpriteBundle {
+                            sprite: Sprite {
+                                color: Color::GRAY,
+                                ..default()
+                            },
+                            ..default()
+                        },
+                    ));
+                    *state = State::Placing;
+                }
             },
+            _ => {}
         }
     }
 }
