@@ -1,0 +1,15 @@
+[package]
+name = "bevy_physics_playground"
+version = "0.1.0"
+edition = "2021"
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bevy = "0.10.1"
+bevy_egui = "0.20.2"
+bevy_rapier2d = "0.21.0"
+rand = "0.8.5"
