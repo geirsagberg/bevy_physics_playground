@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::time::Duration;
 
 use bevy::{prelude::*, time::common_conditions::on_timer};
@@ -12,15 +13,34 @@ fn main() {
         .add_plugin(RapierDebugRenderPlugin::default().disabled())
         .add_plugin(EguiPlugin)
         .add_startup_system(setup_camera)
-        // .add_startup_system(setup_initial_blocks)
+        .add_event::<ToolEvent>()
         .add_system(update_ui)
         .add_system(update_placing.before(update_ui))
         .add_system(spawn_balls.run_if(on_timer(Duration::from_secs_f32(0.1))))
         .add_system(despawn_outside_world)
         .add_system(toggle_debug_rendering)
+        .add_system(handle_creation_events)
+        .add_system(handle_input)
+        .add_system(highlight_sprites)
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(State::Default)
         .run();
+}
+
+fn highlight_sprites(
+    mut added_query: Query<(&mut Sprite), Added<Highlighted>>,
+    mut removed_query: Query<&mut Sprite, Without<Highlighted>>,
+    mut removals: RemovedComponents<Highlighted>,
+) {
+    for (mut sprite) in &mut added_query {
+        sprite.color = Color::RED;
+    }
+
+    for entity in removals.iter() {
+        if let Ok(mut sprite) = removed_query.get_mut(entity) {
+            sprite.color = Color::WHITE;
+        }
+    }
 }
 
 fn toggle_debug_rendering(
@@ -50,12 +70,18 @@ fn despawn_outside_world(
     }
 }
 
-#[derive(Resource, Debug)]
+#[derive(Resource, Debug, PartialEq)]
 enum State {
     Default,
     Placing,
-    Scaling,
+    Scaling { start: Vec3 },
     Rotating,
+    Selecting(SelectAction),
+}
+
+#[derive(PartialEq, Debug, Clone, Copy)]
+enum SelectAction {
+    Delete,
 }
 
 #[derive(Component)]
@@ -90,6 +116,9 @@ fn spawn_balls(mut commands: Commands, window_query: Query<&Window>) {
     ));
 }
 
+#[derive(Debug, Clone, Copy, Component)]
+struct Highlighted;
+
 fn update_placing(
     mut placing_query: Query<(Entity, &mut Transform, &mut Sprite), With<Placing>>,
     camera_query: Query<(&GlobalTransform, &Camera)>,
@@ -97,6 +126,8 @@ fn update_placing(
     mouse: Res<Input<MouseButton>>,
     mut state: ResMut<State>,
     mut commands: Commands,
+    rapier_context: Res<RapierContext>,
+    highlighted_query: Query<Entity, With<Highlighted>>,
 ) {
     let (camera_transform, camera) = camera_query.single();
     let window = window_query.single();
@@ -114,11 +145,16 @@ fn update_placing(
                 transform.translation.y = position.y;
             }
             if mouse.just_pressed(MouseButton::Left) {
-                *state = State::Scaling;
+                *state = State::Scaling {
+                    start: position.extend(0.),
+                };
             }
         }
-        State::Scaling => {
+        State::Scaling { start } => {
             for (_, mut transform, _) in &mut placing_query {
+                transform.translation.x = (position.x + start.x) / 2.;
+                transform.translation.y = (position.y + start.y) / 2.;
+
                 transform.scale.x = ((position.x - transform.translation.x) * 2.).abs();
                 transform.scale.y = ((position.y - transform.translation.y) * 2.).abs();
 
@@ -146,16 +182,75 @@ fn update_placing(
                 }
             }
         }
+        State::Selecting(action) => {
+            let mut entities = Vec::new();
+
+            rapier_context.intersections_with_point(position, QueryFilter::default(), |entity| {
+                entities.push(entity);
+                true
+            });
+
+            for entity in &entities {
+                commands.entity(*entity).insert(Highlighted);
+            }
+
+            for entity in &highlighted_query {
+                if !entities.contains(&entity) {
+                    commands.entity(entity).remove::<Highlighted>();
+                }
+            }
+
+            if mouse.just_pressed(MouseButton::Left) {
+                for entity in entities {
+                    match action {
+                        SelectAction::Delete => commands.entity(entity).despawn(),
+                    }
+                }
+
+                *state = State::Default;
+            }
+        }
     }
 }
 
-fn update_ui(mut egui_contexts: EguiContexts, mut commands: Commands, mut state: ResMut<State>) {
+enum Tool {
+    Box,
+    Delete,
+}
+
+struct ToolEvent(Tool);
+
+fn update_ui(
+    mut egui_contexts: EguiContexts,
+    state: Res<State>,
+    mut event_sender: EventWriter<ToolEvent>,
+) {
     let ctx = egui_contexts.ctx_mut();
 
     egui::Window::new("Physics").show(ctx, |ui| {
         ui.label(format!("State: {:?}", *state));
-        if ui.button("Box").clicked() {
-            match *state {
+
+        let mut add_button = |label: &str, tool: Tool| {
+            ui.add_enabled_ui(*state == State::Default, |ui| {
+                if ui.button(label).clicked() {
+                    event_sender.send(ToolEvent(tool));
+                }
+            });
+        };
+
+        add_button("Box", Tool::Box);
+        add_button("Delete", Tool::Delete);
+    });
+}
+
+fn handle_creation_events(
+    mut event_reader: EventReader<ToolEvent>,
+    mut commands: Commands,
+    mut state: ResMut<State>,
+) {
+    for event in event_reader.iter() {
+        match event.0 {
+            Tool::Box => match *state {
                 State::Default => {
                     commands.spawn((
                         Placing,
@@ -170,7 +265,41 @@ fn update_ui(mut egui_contexts: EguiContexts, mut commands: Commands, mut state:
                     *state = State::Placing;
                 }
                 _ => {}
+            },
+            Tool::Delete => match *state {
+                State::Default => {
+                    *state = State::Selecting(SelectAction::Delete);
+                }
+                _ => {}
+            },
+        }
+    }
+}
+
+fn handle_input(
+    mut commands: Commands,
+    mut state: ResMut<State>,
+    keyboard_input: Res<Input<KeyCode>>,
+    mut event_sender: EventWriter<ToolEvent>,
+    placing_query: Query<Entity, With<Placing>>,
+) {
+    if keyboard_input.just_pressed(KeyCode::Escape) {
+        match *state {
+            State::Default => {}
+            _ => {
+                *state = State::Default;
+
+                if let Ok(entity) = placing_query.get_single() {
+                    commands.entity(entity).despawn();
+                }
             }
         }
-    });
+    }
+    if keyboard_input.just_pressed(KeyCode::B) {
+        event_sender.send(ToolEvent(Tool::Box));
+    }
+
+    if keyboard_input.just_pressed(KeyCode::D) {
+        event_sender.send(ToolEvent(Tool::Delete));
+    }
 }
