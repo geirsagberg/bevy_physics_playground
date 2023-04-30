@@ -19,7 +19,7 @@ fn main() {
         .add_system(spawn_balls.run_if(on_timer(Duration::from_secs_f32(0.01))))
         .add_system(despawn_outside_world)
         .add_system(toggle_debug_rendering)
-        .add_system(handle_creation_events)
+        .add_system(handle_tool_events)
         .add_system(handle_input)
         .add_system(highlight_sprites)
         .insert_resource(ClearColor(Color::BLACK))
@@ -82,6 +82,7 @@ enum State {
 #[derive(PartialEq, Debug, Clone, Copy)]
 enum SelectAction {
     Delete,
+    Move,
 }
 
 #[derive(Component)]
@@ -201,13 +202,24 @@ fn update_placing(
             }
 
             if mouse.just_pressed(MouseButton::Left) {
-                for entity in entities {
-                    match action {
-                        SelectAction::Delete => commands.entity(entity).despawn(),
+                match action {
+                    SelectAction::Delete => {
+                        for entity in entities {
+                            commands.entity(entity).despawn();
+                        }
+                        *state = State::Default;
+                    }
+                    SelectAction::Move => {
+                        *state = State::Default;
+                        for entity in entities {
+                            commands
+                                .entity(entity)
+                                .remove::<(RigidBody, Collider)>()
+                                .insert(Placing);
+                            *state = State::Placing;
+                        }
                     }
                 }
-
-                *state = State::Default;
             }
         }
     }
@@ -216,6 +228,7 @@ fn update_placing(
 enum Tool {
     Box,
     Delete,
+    Move,
     ForceField,
 }
 
@@ -241,10 +254,11 @@ fn update_ui(
 
         add_button("Box", Tool::Box);
         add_button("Delete", Tool::Delete);
+        add_button("Move", Tool::Move);
     });
 }
 
-fn handle_creation_events(
+fn handle_tool_events(
     mut event_reader: EventReader<ToolEvent>,
     mut commands: Commands,
     mut state: ResMut<State>,
@@ -280,6 +294,9 @@ fn handle_creation_events(
                         },
                     ));
                     *state = State::Placing;
+                }
+                Tool::Move => {
+                    *state = State::Selecting(SelectAction::Move);
                 }
             },
             _ => {}
