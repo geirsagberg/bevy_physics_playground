@@ -2,13 +2,12 @@
 
 use std::time::Duration;
 
-use strum_macros::EnumIter;
-
 use bevy::{prelude::*, time::common_conditions::on_timer};
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use bevy_rapier2d::prelude::*;
 use rand::random;
 use strum::IntoEnumIterator;
+use strum_macros::EnumIter;
 
 use crate::Command::Place;
 
@@ -227,7 +226,9 @@ fn update_placing(
                         commands.insert_resource(State::Default);
                     }
                     SelectAction::Move => {
-                        let state = if entities.is_empty() { State::Default } else { State::Moving };
+                        let state = if entities.is_empty() { State::Default } else {
+                            State::Moving
+                        };
                         commands.insert_resource(state);
                         for entity in entities {
                             commands
@@ -259,7 +260,7 @@ fn update_placing(
 }
 
 
-#[derive(EnumIter)]
+#[derive(EnumIter, Copy, Clone, PartialEq, Eq, Hash, Debug)]
 enum Tool {
     Box,
     Delete,
@@ -276,6 +277,16 @@ impl Tool {
             Tool::Move => KeyCode::M,
             Tool::Rotate => KeyCode::R,
             Tool::ForceField => KeyCode::F,
+        }
+    }
+
+    fn label(&self) -> &str {
+        match self {
+            Tool::Box => "Box",
+            Tool::Delete => "Delete",
+            Tool::Move => "Move",
+            Tool::Rotate => "Rotate",
+            Tool::ForceField => "Force Field",
         }
     }
 }
@@ -306,10 +317,10 @@ fn update_ui(
             });
         };
 
-        add_button("Box", Tool::Box);
-        add_button("Delete", Tool::Delete);
-        add_button("Move", Tool::Move);
-        add_button("Rotate", Tool::Rotate);
+
+        for tool in Tool::iter() {
+            add_button(tool.label(), tool);
+        }
     });
 }
 
