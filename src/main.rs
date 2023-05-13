@@ -3,21 +3,19 @@
 use std::time::Duration;
 
 use bevy::{prelude::*, time::common_conditions::on_timer};
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::render::texture::BevyDefault;
+use bevy::render::render_resource::{ShaderType, TextureDimension, TextureFormat};
 use bevy::sprite::{MaterialMesh2dBundle, Mesh2dHandle};
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use bevy_rapier2d::prelude::*;
-use perlin_noise::PerlinNoise;
-use rand::{random, Rng};
+use rand::random;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
 use crate::Command::Place;
 
-struct MainPlugin;
+mod perlin;
 
-const TEXTURE_SIZE: u32 = 512;
+struct MainPlugin;
 
 impl Plugin for MainPlugin {
     fn build(&self, app: &mut App) {
@@ -35,6 +33,7 @@ fn main() {
         .add_plugin(EguiPlugin)
         .add_plugin(MainPlugin)
         .add_startup_system(setup_camera)
+        .add_startup_system(generate_textures)
         .add_event::<ToolEvent>()
         .add_event::<CommandEvent>()
         .add_system(update_ui)
@@ -47,6 +46,32 @@ fn main() {
         .add_system(handle_input)
         .add_system(highlight_sprites)
         .run();
+}
+
+#[derive(Resource, Debug)]
+struct Meshes {
+    meshes: Vec<Mesh2dHandle>,
+}
+
+impl Meshes {
+    fn get_random(&self) -> Mesh2dHandle {
+        let index = random::<usize>() % self.meshes.len();
+        self.meshes[index].clone()
+    }
+}
+
+fn generate_textures(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let meshes = VERTEX_COLORS.map(|colors| {
+        let vertex_colors: Vec<[f32; 4]> = colors.map(|color| color.as_rgba_f32()).to_vec();
+        let mut mesh = Mesh::from(shape::Quad::default());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vertex_colors);
+        let handle: Mesh2dHandle = meshes.add(mesh).into();
+        handle
+    }).to_vec();
+    commands.insert_resource(Meshes { meshes });
 }
 
 fn highlight_sprites(
@@ -85,7 +110,10 @@ fn despawn_outside_world(
 ) {
     if let Ok(window) = window_query.get_single() {
         for (entity, transform) in &mut query.iter() {
-            if transform.translation.y < -window.resolution.height() / 2. {
+            if transform.translation.y < -window.resolution.height()
+                || transform.translation.x < -window.resolution.width()
+                || transform.translation.x > window.resolution.width()
+                || transform.translation.y > window.resolution.height() {
                 commands.entity(entity).despawn();
             }
         }
@@ -151,7 +179,8 @@ fn spawn_balls(mut commands: Commands, window_query: Query<&Window>) {
 struct Highlighted;
 
 fn handle_mouse_controls(
-    mut placing_query: Query<(&mut Transform), With<Placing>>,
+    mut placing_query: Query<(&mut Transform), (With<Placing>, Without<Collider>)>,
+    mut moving_query: Query<(&mut Velocity, &Transform), (With<Placing>, With<Collider>)>,
     camera_query: Query<(&GlobalTransform, &Camera)>,
     window_query: Query<&Window>,
     mouse: Res<Input<MouseButton>>,
@@ -173,6 +202,13 @@ fn handle_mouse_controls(
         for (mut transform) in &mut placing_query {
             transform.translation.x = position.x;
             transform.translation.y = position.y;
+        }
+    };
+
+    let mut move_towards_mouse = || {
+        for (mut velocity, transform) in &mut moving_query {
+            velocity.linvel.x = (position.x - transform.translation.x) * 10.;
+            velocity.linvel.y = (position.y - transform.translation.y) * 10.;
         }
     };
 
@@ -276,7 +312,7 @@ fn handle_mouse_controls(
             }
         }
         State::Moving => {
-            move_to_mouse();
+            move_towards_mouse();
             if mouse.just_pressed(MouseButton::Left) {
                 command_event_writer.send(CommandEvent(Place));
             }
@@ -361,13 +397,13 @@ fn handle_command_events(
         match event.0 {
             Place => {
                 for entity in &mut query {
-
-                    // sprite.color = Color::WHITE;
-
                     commands
                         .entity(entity)
                         .remove::<Placing>()
-                        .insert(RigidBody::KinematicPositionBased)
+                        .insert(RigidBody::Dynamic)
+                        .insert(GravityScale(0.0))
+                        .insert(Velocity::default())
+                        // .insert(ActiveCollisionTypes::KINEMATIC_KINEMATIC)
                         .insert(Collider::cuboid(0.5, 0.5));
                 }
                 commands.insert_resource(State::Default);
@@ -376,44 +412,36 @@ fn handle_command_events(
     }
 }
 
-const VERTEX_COLORS: [[Color; 4]; 3] = [
-    [Color::CYAN, Color::WHITE, Color::FUCHSIA, Color::BLUE],
-    [Color::GREEN, Color::YELLOW, Color::WHITE, Color::CYAN],
-    [Color::WHITE, Color::YELLOW, Color::RED, Color::FUCHSIA],
+// const VERTEX_COLORS: [[Color; 4]; 3] = [
+//     [Color::CYAN, Color::WHITE, Color::FUCHSIA, Color::BLUE],
+//     [Color::GREEN, Color::YELLOW, Color::WHITE, Color::CYAN],
+//     [Color::WHITE, Color::YELLOW, Color::RED, Color::FUCHSIA],
+// ];
+
+const VERTEX_COLORS: [[Color; 4]; 4] = [
+    [Color::RED, Color::WHITE, Color::GREEN, Color::BLUE],
+    [Color::YELLOW, Color::WHITE, Color::PURPLE, Color::RED],
+    [Color::ORANGE, Color::BLUE, Color::WHITE, Color::YELLOW],
+    [Color::PURPLE, Color::YELLOW, Color::WHITE, Color::BLUE],
 ];
 
 fn handle_tool_events(
     mut event_reader: EventReader<ToolEvent>,
     mut commands: Commands,
     state: Res<State>,
-    mut images: ResMut<Assets<Image>>,
-    mut meshes: ResMut<Assets<Mesh>>,
+    meshes: Res<Meshes>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     for event in event_reader.iter() {
         match *state {
             State::Default => match event.0 {
                 Tool::Box => {
-                    // let image = create_perlin_image();
-                    // let image_handle = images.add(image);
-
-                    let mut mesh = Mesh::from(shape::Quad::default());
-                    // Build vertex colors for the quad. One entry per vertex (the corners of the quad)
-                    let random_int = rand::thread_rng().gen_range(0..3);
-                    let vertex_colors: Vec<[f32; 4]> = VERTEX_COLORS[random_int].map(|color| color.as_rgba_f32()).to_vec();
-                    // Insert the vertex colors as an attribute
-                    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vertex_colors);
-
-                    let mesh_handle: Mesh2dHandle = meshes.add(mesh).into();
-
-                    // let material = materials.add(ColorMaterial::from(image_handle));
-
                     let material = materials.add(ColorMaterial::default());
 
                     commands.spawn((
                         Placing,
                         MaterialMesh2dBundle {
-                            mesh: mesh_handle,
+                            mesh: meshes.get_random(),
                             material,
                             ..default()
                         },
@@ -449,31 +477,6 @@ fn handle_tool_events(
             _ => {}
         }
     }
-}
-
-fn create_perlin_image() -> Image {
-    let perlin = PerlinNoise::new();
-    let mut pixels = Vec::with_capacity((TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize);
-    for y in 0..TEXTURE_SIZE {
-        for x in 0..TEXTURE_SIZE {
-            let noise_value = perlin.get2d([x as f64 / 64.0, y as f64 / 64.0]);
-            let alpha = (noise_value * 255.0) as u8;
-            pixels.push(255);
-            pixels.push(255);
-            pixels.push(255);
-            pixels.push(alpha);
-        }
-    }
-    Image::new(
-        Extent3d {
-            width: TEXTURE_SIZE,
-            height: TEXTURE_SIZE,
-            ..default()
-        },
-        TextureDimension::D2,
-        pixels,
-        TextureFormat::bevy_default(),
-    )
 }
 
 fn handle_input(
