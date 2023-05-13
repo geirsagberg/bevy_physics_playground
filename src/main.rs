@@ -3,15 +3,21 @@
 use std::time::Duration;
 
 use bevy::{prelude::*, time::common_conditions::on_timer};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::texture::BevyDefault;
+use bevy::sprite::{MaterialMesh2dBundle, Mesh2dHandle};
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use bevy_rapier2d::prelude::*;
-use rand::random;
+use perlin_noise::PerlinNoise;
+use rand::{random, Rng};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
 use crate::Command::Place;
 
 struct MainPlugin;
+
+const TEXTURE_SIZE: u32 = 512;
 
 impl Plugin for MainPlugin {
     fn build(&self, app: &mut App) {
@@ -32,7 +38,7 @@ fn main() {
         .add_event::<ToolEvent>()
         .add_event::<CommandEvent>()
         .add_system(update_ui)
-        .add_system(update_placing.before(update_ui))
+        .add_system(handle_mouse_controls.before(update_ui))
         .add_system(spawn_balls.run_if(on_timer(Duration::from_secs_f32(0.01))))
         .add_system(despawn_outside_world)
         .add_system(toggle_debug_rendering)
@@ -101,10 +107,14 @@ enum SelectAction {
     Delete,
     Move,
     Rotate,
+    Scale,
 }
 
 #[derive(Component)]
 struct Placing;
+
+#[derive(Component)]
+struct ForceField;
 
 fn spawn_balls(mut commands: Commands, window_query: Query<&Window>) {
     let resolution = match window_query.get_single() {
@@ -116,6 +126,8 @@ fn spawn_balls(mut commands: Commands, window_query: Query<&Window>) {
 
     let rand_position = Vec2::new(width * (random::<f32>() - 0.5), height * 0.5 + 100.);
     let half = 1.;
+    let random_color = Color::rgb(random(), random(), random());
+
     commands.spawn((
         RigidBody::Dynamic,
         Collider::ball(half),
@@ -126,7 +138,7 @@ fn spawn_balls(mut commands: Commands, window_query: Query<&Window>) {
                 ..default()
             },
             sprite: Sprite {
-                color: Color::WHITE,
+                color: random_color,
                 custom_size: Some(Vec2::new(half * 2., half * 2.)),
                 ..default()
             },
@@ -138,7 +150,7 @@ fn spawn_balls(mut commands: Commands, window_query: Query<&Window>) {
 #[derive(Debug, Clone, Copy, Component)]
 struct Highlighted;
 
-fn update_placing(
+fn handle_mouse_controls(
     mut placing_query: Query<(&mut Transform), With<Placing>>,
     camera_query: Query<(&GlobalTransform, &Camera)>,
     window_query: Query<&Window>,
@@ -181,10 +193,9 @@ fn update_placing(
 
                 transform.scale.x = ((position.x - transform.translation.x) * 2.).abs();
                 transform.scale.y = ((position.y - transform.translation.y) * 2.).abs();
-
-                if mouse.just_pressed(MouseButton::Left) {
-                    command_event_writer.send(CommandEvent(Place));
-                }
+            }
+            if mouse.just_pressed(MouseButton::Left) {
+                command_event_writer.send(CommandEvent(Place));
             }
         }
         State::Rotating => {
@@ -233,12 +244,26 @@ fn update_placing(
                         for entity in entities {
                             commands
                                 .entity(entity)
-                                .remove::<(RigidBody, Collider)>()
+                                // .remove::<(RigidBody, Collider)>()
                                 .insert(Placing);
                         }
                     }
                     SelectAction::Rotate => {
                         let state = if entities.is_empty() { State::Default } else { State::Rotating };
+                        commands.insert_resource(state);
+                        for entity in entities {
+                            commands
+                                .entity(entity)
+                                // .remove::<(RigidBody, Collider)>()
+                                .insert(Placing);
+                        }
+                    }
+                    SelectAction::Scale => {
+                        let state = if entities.is_empty() { State::Default } else {
+                            State::Scaling {
+                                start: position.extend(0.)
+                            }
+                        };
                         commands.insert_resource(state);
                         for entity in entities {
                             commands
@@ -266,6 +291,7 @@ enum Tool {
     Delete,
     Move,
     Rotate,
+    Scale,
     ForceField,
 }
 
@@ -277,6 +303,7 @@ impl Tool {
             Tool::Move => KeyCode::M,
             Tool::Rotate => KeyCode::R,
             Tool::ForceField => KeyCode::F,
+            Tool::Scale => KeyCode::S,
         }
     }
 
@@ -287,6 +314,7 @@ impl Tool {
             Tool::Move => "Move",
             Tool::Rotate => "Rotate",
             Tool::ForceField => "Force Field",
+            Tool::Scale => "Scale",
         }
     }
 }
@@ -327,18 +355,19 @@ fn update_ui(
 fn handle_command_events(
     mut event_reader: EventReader<CommandEvent>,
     mut commands: Commands,
-    mut query: Query<(Entity, &mut Sprite), With<Placing>>,
+    mut query: Query<Entity, With<Placing>>,
 ) {
     for event in event_reader.iter() {
         match event.0 {
             Place => {
-                for (entity, mut sprite) in &mut query {
-                    sprite.color = Color::WHITE;
+                for entity in &mut query {
+
+                    // sprite.color = Color::WHITE;
 
                     commands
                         .entity(entity)
                         .remove::<Placing>()
-                        .insert(RigidBody::Fixed)
+                        .insert(RigidBody::KinematicPositionBased)
                         .insert(Collider::cuboid(0.5, 0.5));
                 }
                 commands.insert_resource(State::Default);
@@ -347,22 +376,45 @@ fn handle_command_events(
     }
 }
 
+const VERTEX_COLORS: [[Color; 4]; 3] = [
+    [Color::CYAN, Color::WHITE, Color::FUCHSIA, Color::BLUE],
+    [Color::GREEN, Color::YELLOW, Color::WHITE, Color::CYAN],
+    [Color::WHITE, Color::YELLOW, Color::RED, Color::FUCHSIA],
+];
+
 fn handle_tool_events(
     mut event_reader: EventReader<ToolEvent>,
     mut commands: Commands,
     state: Res<State>,
+    mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     for event in event_reader.iter() {
         match *state {
             State::Default => match event.0 {
                 Tool::Box => {
+                    // let image = create_perlin_image();
+                    // let image_handle = images.add(image);
+
+                    let mut mesh = Mesh::from(shape::Quad::default());
+                    // Build vertex colors for the quad. One entry per vertex (the corners of the quad)
+                    let random_int = rand::thread_rng().gen_range(0..3);
+                    let vertex_colors: Vec<[f32; 4]> = VERTEX_COLORS[random_int].map(|color| color.as_rgba_f32()).to_vec();
+                    // Insert the vertex colors as an attribute
+                    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vertex_colors);
+
+                    let mesh_handle: Mesh2dHandle = meshes.add(mesh).into();
+
+                    // let material = materials.add(ColorMaterial::from(image_handle));
+
+                    let material = materials.add(ColorMaterial::default());
+
                     commands.spawn((
                         Placing,
-                        SpriteBundle {
-                            sprite: Sprite {
-                                color: Color::GRAY,
-                                ..default()
-                            },
+                        MaterialMesh2dBundle {
+                            mesh: mesh_handle,
+                            material,
                             ..default()
                         },
                     ));
@@ -390,15 +442,43 @@ fn handle_tool_events(
                 Tool::Rotate => {
                     commands.insert_resource(State::Selecting(SelectAction::Rotate));
                 }
+                Tool::Scale => {
+                    commands.insert_resource(State::Selecting(SelectAction::Scale));
+                }
             },
             _ => {}
         }
     }
 }
 
+fn create_perlin_image() -> Image {
+    let perlin = PerlinNoise::new();
+    let mut pixels = Vec::with_capacity((TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize);
+    for y in 0..TEXTURE_SIZE {
+        for x in 0..TEXTURE_SIZE {
+            let noise_value = perlin.get2d([x as f64 / 64.0, y as f64 / 64.0]);
+            let alpha = (noise_value * 255.0) as u8;
+            pixels.push(255);
+            pixels.push(255);
+            pixels.push(255);
+            pixels.push(alpha);
+        }
+    }
+    Image::new(
+        Extent3d {
+            width: TEXTURE_SIZE,
+            height: TEXTURE_SIZE,
+            ..default()
+        },
+        TextureDimension::D2,
+        pixels,
+        TextureFormat::bevy_default(),
+    )
+}
+
 fn handle_input(
     mut commands: Commands,
-    mut state: ResMut<State>,
+    state: Res<State>,
     keyboard_input: Res<Input<KeyCode>>,
     mut event_sender: EventWriter<ToolEvent>,
     placing_query: Query<Entity, With<Placing>>,
@@ -407,7 +487,7 @@ fn handle_input(
         match *state {
             State::Default => {}
             _ => {
-                *state = State::Default;
+                commands.insert_resource(State::Default);
 
                 if let Ok(entity) = placing_query.get_single() {
                     commands.entity(entity).despawn();
