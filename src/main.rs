@@ -3,17 +3,22 @@
 use std::time::Duration;
 
 use bevy::{prelude::*, time::common_conditions::on_timer};
-use bevy::render::render_resource::{ShaderType, TextureDimension, TextureFormat};
-use bevy::sprite::{MaterialMesh2dBundle, Mesh2dHandle};
-use bevy_egui::{egui, EguiContexts, EguiPlugin};
+use bevy::sprite::MaterialMesh2dBundle;
+use bevy::utils::HashSet;
+use bevy_egui::EguiPlugin;
+use bevy_prototype_debug_lines::{DebugLines, DebugLinesPlugin, DebugShapes};
 use bevy_rapier2d::prelude::*;
-use rand::random;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
-use crate::Command::Place;
+use Command::Created;
+use Command::Scaled;
+use textures::Meshes;
 
 mod perlin;
+mod balls;
+mod ui;
+mod textures;
 
 struct MainPlugin;
 
@@ -21,7 +26,8 @@ impl Plugin for MainPlugin {
     fn build(&self, app: &mut App) {
         app
             .insert_resource(ClearColor(Color::BLACK))
-            .insert_resource(State::Default);
+            .insert_resource(Mode::Default)
+            .insert_resource(Mouse::default());
     }
 }
 
@@ -31,64 +37,71 @@ fn main() {
         .add_plugin(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(100.))
         .add_plugin(RapierDebugRenderPlugin::default().disabled())
         .add_plugin(EguiPlugin)
+        .add_plugin(DebugLinesPlugin::default())
         .add_plugin(MainPlugin)
         .add_startup_system(setup_camera)
-        .add_startup_system(generate_textures)
+        .add_startup_system(textures::generate_textures)
         .add_event::<ToolEvent>()
         .add_event::<CommandEvent>()
-        .add_system(update_ui)
-        .add_system(handle_mouse_controls.before(update_ui))
-        .add_system(spawn_balls.run_if(on_timer(Duration::from_secs_f32(0.01))))
-        .add_system(despawn_outside_world)
+        .add_system(ui::update_ui)
+        .add_system(calculate_mouse_position)
+        .add_system(handle_left_click.after(calculate_mouse_position))
+        .add_system(set_hover.after(calculate_mouse_position))
+        .add_system(highlight_hover.after(set_hover))
+        .add_system(balls::spawn_balls.run_if(on_timer(Duration::from_secs_f32(0.01))))
+        .add_system(balls::despawn_outside_world)
         .add_system(toggle_debug_rendering)
         .add_system(handle_tool_events)
         .add_system(handle_command_events)
         .add_system(handle_input)
-        .add_system(highlight_sprites)
+        .add_system(scale)
+        .add_system(move_towards_mouse.after(calculate_mouse_position))
+        .add_system(move_to_mouse.after(calculate_mouse_position))
         .run();
 }
 
-#[derive(Resource, Debug)]
-struct Meshes {
-    meshes: Vec<Mesh2dHandle>,
+#[derive(Resource, Debug, Default)]
+struct Mouse {
+    position: Vec2,
 }
 
-impl Meshes {
-    fn get_random(&self) -> Mesh2dHandle {
-        let index = random::<usize>() % self.meshes.len();
-        self.meshes[index].clone()
+#[derive(Component, Debug, Default)]
+struct Hoverable {
+    is_hovered: bool,
+}
+
+fn set_hover(
+    mut query: Query<(&mut Hoverable, Entity)>,
+    rapier_context: Res<RapierContext>,
+    mouse: Res<Mouse>,
+) {
+    let mut entities = HashSet::new();
+    let position = mouse.position;
+
+    rapier_context.intersections_with_point(position, QueryFilter::default(), |entity| {
+        entities.insert(entity);
+        true
+    });
+
+    for (mut hoverable, entity) in query.iter_mut() {
+        hoverable.is_hovered = entities.contains(&entity);
     }
 }
 
-fn generate_textures(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
+fn highlight_hover(
+    mut query: Query<(&Hoverable, &Handle<ColorMaterial>)>,
+    mut color_mterials: ResMut<Assets<ColorMaterial>>,
 ) {
-    let meshes = VERTEX_COLORS.map(|colors| {
-        let vertex_colors: Vec<[f32; 4]> = colors.map(|color| color.as_rgba_f32()).to_vec();
-        let mut mesh = Mesh::from(shape::Quad::default());
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vertex_colors);
-        let handle: Mesh2dHandle = meshes.add(mesh).into();
-        handle
-    }).to_vec();
-    commands.insert_resource(Meshes { meshes });
-}
-
-fn highlight_sprites(
-    mut added_query: Query<(&mut Sprite), Added<Highlighted>>,
-    mut removed_query: Query<&mut Sprite, Without<Highlighted>>,
-    mut removals: RemovedComponents<Highlighted>,
-) {
-    for (mut sprite) in &mut added_query {
-        sprite.color = Color::RED;
-    }
-
-    for entity in removals.iter() {
-        if let Ok(mut sprite) = removed_query.get_mut(entity) {
-            sprite.color = Color::WHITE;
+    for (hoverable, material) in query.iter_mut() {
+        let material = color_mterials.get_mut(material).unwrap();
+        if hoverable.is_hovered {
+            material.color = Color::rgb(0.5, 0.5, 0.5);
+        } else {
+            material.color = Color::WHITE;
         }
     }
 }
+
 
 fn toggle_debug_rendering(
     mut debug_render_context: ResMut<DebugRenderContext>,
@@ -103,31 +116,11 @@ fn setup_camera(mut commands: Commands) {
     commands.spawn(Camera2dBundle::default());
 }
 
-fn despawn_outside_world(
-    mut commands: Commands,
-    query: Query<(Entity, &Transform), Without<Placing>>,
-    window_query: Query<&Window>,
-) {
-    if let Ok(window) = window_query.get_single() {
-        for (entity, transform) in &mut query.iter() {
-            if transform.translation.y < -window.resolution.height()
-                || transform.translation.x < -window.resolution.width()
-                || transform.translation.x > window.resolution.width()
-                || transform.translation.y > window.resolution.height() {
-                commands.entity(entity).despawn();
-            }
-        }
-    }
-}
-
-#[derive(Resource, Debug, PartialEq)]
-enum State {
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+enum Mode {
     Default,
-    Placing,
-    Moving,
-    Scaling { start: Vec3 },
-    Rotating,
-    Selecting(SelectAction),
+    Create,
+    Scaling,
 }
 
 #[derive(PartialEq, Debug, Clone, Copy)]
@@ -137,58 +130,35 @@ enum SelectAction {
     Rotate,
     Scale,
 }
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+enum Modifying {
+    Placing,
+    Scaling {start: Vec3}
+}
 
 #[derive(Component)]
-struct Placing;
+pub struct Placing;
+
+#[derive(Component)]
+struct Moving {
+    start: Vec3,
+}
+
+#[derive(Component)]
+struct Scaling {
+    start: Vec3,
+}
 
 #[derive(Component)]
 struct ForceField;
 
-fn spawn_balls(mut commands: Commands, window_query: Query<&Window>) {
-    let resolution = match window_query.get_single() {
-        Ok(window) => &window.resolution,
-        Err(_) => return,
-    };
-    let width = resolution.width();
-    let height = resolution.height();
-
-    let rand_position = Vec2::new(width * (random::<f32>() - 0.5), height * 0.5 + 100.);
-    let half = 1.;
-    let random_color = Color::rgb(random(), random(), random());
-
-    commands.spawn((
-        RigidBody::Dynamic,
-        Collider::ball(half),
-        Ccd::enabled(),
-        SpriteBundle {
-            transform: Transform {
-                translation: rand_position.extend(0.),
-                ..default()
-            },
-            sprite: Sprite {
-                color: random_color,
-                custom_size: Some(Vec2::new(half * 2., half * 2.)),
-                ..default()
-            },
-            ..default()
-        },
-    ));
-}
-
 #[derive(Debug, Clone, Copy, Component)]
 struct Highlighted;
 
-fn handle_mouse_controls(
-    mut placing_query: Query<(&mut Transform), (With<Placing>, Without<Collider>)>,
-    mut moving_query: Query<(&mut Velocity, &Transform), (With<Placing>, With<Collider>)>,
+fn calculate_mouse_position(
     camera_query: Query<(&GlobalTransform, &Camera)>,
     window_query: Query<&Window>,
-    mouse: Res<Input<MouseButton>>,
-    state: Res<State>,
-    mut commands: Commands,
-    mut command_event_writer: EventWriter<CommandEvent>,
-    rapier_context: Res<RapierContext>,
-    highlighted_query: Query<Entity, With<Highlighted>>,
+    mut mouse: ResMut<Mouse>,
 ) {
     let (camera_transform, camera) = camera_query.single();
     let window = window_query.single();
@@ -198,126 +168,179 @@ fn handle_mouse_controls(
         .and_then(|cursor| camera.viewport_to_world_2d(camera_transform, cursor))
         .unwrap_or_default();
 
-    let mut move_to_mouse = || {
-        for (mut transform) in &mut placing_query {
-            transform.translation.x = position.x;
-            transform.translation.y = position.y;
-        }
-    };
+    mouse.position = position;
+}
 
-    let mut move_towards_mouse = || {
-        for (mut velocity, transform) in &mut moving_query {
-            velocity.linvel.x = (position.x - transform.translation.x) * 10.;
-            velocity.linvel.y = (position.y - transform.translation.y) * 10.;
-        }
-    };
+fn move_to_mouse(
+    mut query: Query<(&mut Transform), With<Placing>>,
+    mouse: Res<Mouse>,
+) {
+    for (mut transform) in &mut query {
+        transform.translation.x = mouse.position.x;
+        transform.translation.y = mouse.position.y;
+    }
+}
 
-    match *state {
-        State::Default => {}
-        State::Placing => {
-            move_to_mouse();
-            if mouse.just_pressed(MouseButton::Left) {
-                commands.insert_resource(State::Scaling {
-                    start: position.extend(0.),
-                });
-            }
-        }
-        State::Scaling { start } => {
-            for (mut transform) in &mut placing_query {
-                transform.translation.x = (position.x + start.x) / 2.;
-                transform.translation.y = (position.y + start.y) / 2.;
+fn move_towards_mouse(
+    mut query: Query<(&mut Velocity, &Transform), (With<Placing>, With<Collider>)>,
+    mouse: Res<Mouse>,
+) {
+    for (mut velocity, transform) in &mut query {
+        velocity.linvel = (mouse.position - transform.translation.truncate()).normalize() * 100.;
+    }
+}
 
-                transform.scale.x = ((position.x - transform.translation.x) * 2.).abs();
-                transform.scale.y = ((position.y - transform.translation.y) * 2.).abs();
+fn handle_left_click(
+    mouse_input: Res<Input<MouseButton>>,
+    mode: Res<Mode>,
+    mouse: Res<Mouse>,
+    mut event_writer: EventWriter<CommandEvent>,
+) {
+    if mouse_input.just_pressed(MouseButton::Left) {
+        match *mode {
+            Mode::Default => {}
+            Mode::Create => {
+                event_writer.send(CommandEvent { command: Created { position: mouse.position } });
             }
-            if mouse.just_pressed(MouseButton::Left) {
-                command_event_writer.send(CommandEvent(Place));
-            }
-        }
-        State::Rotating => {
-            for (mut transform) in &mut placing_query {
-                transform.rotation = Quat::from_rotation_z(
-                    -(position - transform.translation.truncate())
-                        .angle_between(Vec2::new(1.0, 0.0)),
-                );
-            }
-
-            if mouse.just_pressed(MouseButton::Left) {
-                command_event_writer.send(CommandEvent(Place));
-            }
-        }
-        State::Selecting(action) => {
-            let mut entities = Vec::new();
-
-            rapier_context.intersections_with_point(position, QueryFilter::default(), |entity| {
-                entities.push(entity);
-                true
-            });
-
-            for entity in &entities {
-                commands.entity(*entity).insert(Highlighted);
-            }
-
-            for entity in &highlighted_query {
-                if !entities.contains(&entity) {
-                    commands.entity(entity).remove::<Highlighted>();
-                }
-            }
-
-            if mouse.just_pressed(MouseButton::Left) {
-                match action {
-                    SelectAction::Delete => {
-                        for entity in entities {
-                            commands.entity(entity).despawn();
-                        }
-                        commands.insert_resource(State::Default);
-                    }
-                    SelectAction::Move => {
-                        let state = if entities.is_empty() { State::Default } else {
-                            State::Moving
-                        };
-                        commands.insert_resource(state);
-                        for entity in entities {
-                            commands
-                                .entity(entity)
-                                // .remove::<(RigidBody, Collider)>()
-                                .insert(Placing);
-                        }
-                    }
-                    SelectAction::Rotate => {
-                        let state = if entities.is_empty() { State::Default } else { State::Rotating };
-                        commands.insert_resource(state);
-                        for entity in entities {
-                            commands
-                                .entity(entity)
-                                // .remove::<(RigidBody, Collider)>()
-                                .insert(Placing);
-                        }
-                    }
-                    SelectAction::Scale => {
-                        let state = if entities.is_empty() { State::Default } else {
-                            State::Scaling {
-                                start: position.extend(0.)
-                            }
-                        };
-                        commands.insert_resource(state);
-                        for entity in entities {
-                            commands
-                                .entity(entity)
-                                .remove::<(RigidBody, Collider)>()
-                                .insert(Placing);
-                        }
-                    }
-                }
-            }
-        }
-        State::Moving => {
-            move_towards_mouse();
-            if mouse.just_pressed(MouseButton::Left) {
-                command_event_writer.send(CommandEvent(Place));
+            Mode::Scaling => {
+                event_writer.send(CommandEvent { command: Scaled });
             }
         }
     }
+}
+
+fn scale(
+    mut query: Query<(&mut Transform, &Scaling)>,
+    mouse: Res<Mouse>,
+) {
+    let position = mouse.position;
+    for (mut transform, scaling) in &mut query {
+        let start = scaling.start;
+        transform.translation.x = (position.x + start.x) / 2.;
+        transform.translation.y = (position.y + start.y) / 2.;
+
+        transform.scale.x = ((position.x - transform.translation.x) * 2.).abs();
+        transform.scale.y = ((position.y - transform.translation.y) * 2.).abs();
+    }
+}
+
+fn handle_mouse_controls(
+    mut placing_query: Query<(&mut Transform), (With<Placing>, Without<Collider>)>,
+    mut moving_query: Query<(&mut Velocity, &Transform), (With<Placing>, With<Collider>)>,
+    mouse: Res<Mouse>,
+    mode: Res<Mode>,
+    mouse_input: Res<Input<MouseButton>>,
+    mut commands: Commands,
+    mut command_event_writer: EventWriter<CommandEvent>,
+    rapier_context: Res<RapierContext>,
+    highlighted_query: Query<Entity, With<Highlighted>>,
+) {
+    // match *mode {
+    //     Mode::Default => {}
+    //     State::Placing => {
+    //         move_to_mouse();
+    //         if mouse_input.just_pressed(MouseButton::Left) {
+    //             commands.insert_resource(State::Scaling {
+    //                 start: position.extend(0.),
+    //             });
+    //         }
+    //     }
+    //     State::Scaling { start } => {
+    //         for (mut transform) in &mut placing_query {
+    //             transform.translation.x = (position.x + start.x) / 2.;
+    //             transform.translation.y = (position.y + start.y) / 2.;
+    //
+    //             transform.scale.x = ((position.x - transform.translation.x) * 2.).abs();
+    //             transform.scale.y = ((position.y - transform.translation.y) * 2.).abs();
+    //         }
+    //         if mouse_input.just_pressed(MouseButton::Left) {
+    //             command_event_writer.send(CommandEvent(Place));
+    //         }
+    //     }
+    //     State::Rotating => {
+    //         for (mut transform) in &mut placing_query {
+    //             transform.rotation = Quat::from_rotation_z(
+    //                 -(position - transform.translation.truncate())
+    //                     .angle_between(Vec2::new(1.0, 0.0)),
+    //             );
+    //         }
+    //
+    //         if mouse_input.just_pressed(MouseButton::Left) {
+    //             command_event_writer.send(CommandEvent(Place));
+    //         }
+    //     }
+    //     State::Selecting(action) => {
+    //         let mut entities = Vec::new();
+    //
+    //         rapier_context.intersections_with_point(position, QueryFilter::default(), |entity| {
+    //             entities.push(entity);
+    //             true
+    //         });
+    //
+    //         for entity in &entities {
+    //             commands.entity(*entity).insert(Highlighted);
+    //         }
+    //
+    //         for entity in &highlighted_query {
+    //             if !entities.contains(&entity) {
+    //                 commands.entity(entity).remove::<Highlighted>();
+    //             }
+    //         }
+    //
+    //         if mouse_input.just_pressed(MouseButton::Left) {
+    //             match action {
+    //                 SelectAction::Delete => {
+    //                     for entity in entities {
+    //                         commands.entity(entity).despawn();
+    //                     }
+    //                     commands.insert_resource(Mode::Default);
+    //                 }
+    //                 SelectAction::Move => {
+    //                     let state = if entities.is_empty() { Mode::Default } else {
+    //                         State::Moving
+    //                     };
+    //                     commands.insert_resource(state);
+    //                     for entity in entities {
+    //                         commands
+    //                             .entity(entity)
+    //                             // .remove::<(RigidBody, Collider)>()
+    //                             .insert(Placing);
+    //                     }
+    //                 }
+    //                 SelectAction::Rotate => {
+    //                     let state = if entities.is_empty() { Mode::Default } else { State::Rotating };
+    //                     commands.insert_resource(state);
+    //                     for entity in entities {
+    //                         commands
+    //                             .entity(entity)
+    //                             // .remove::<(RigidBody, Collider)>()
+    //                             .insert(Placing);
+    //                     }
+    //                 }
+    //                 SelectAction::Scale => {
+    //                     let state = if entities.is_empty() { Mode::Default } else {
+    //                         State::Scaling {
+    //                             start: position.extend(0.)
+    //                         }
+    //                     };
+    //                     commands.insert_resource(state);
+    //                     for entity in entities {
+    //                         commands
+    //                             .entity(entity)
+    //                             .remove::<(RigidBody, Collider)>()
+    //                             .insert(Placing);
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     State::Moving => {
+    //         move_towards_mouse();
+    //         if mouse_input.just_pressed(MouseButton::Left) {
+    //             command_event_writer.send(CommandEvent(Place));
+    //         }
+    //     }
+    // }
 }
 
 
@@ -355,86 +378,70 @@ impl Tool {
     }
 }
 
-struct ToolEvent(Tool);
-
-enum Command {
-    Place,
+struct ToolEvent {
+    tool: Tool,
 }
 
-struct CommandEvent(Command);
+enum Command {
+    Created { position: Vec2 },
+    Scaled,
+}
 
-fn update_ui(
-    mut egui_contexts: EguiContexts,
-    state: Res<State>,
-    mut event_sender: EventWriter<ToolEvent>,
-) {
-    let ctx = egui_contexts.ctx_mut();
-
-    egui::Window::new("Physics").show(ctx, |ui| {
-        ui.label(format!("State: {:?}", *state));
-
-        let mut add_button = |label: &str, tool: Tool| {
-            ui.add_enabled_ui(*state == State::Default, |ui| {
-                if ui.button(label).clicked() {
-                    event_sender.send(ToolEvent(tool));
-                }
-            });
-        };
-
-
-        for tool in Tool::iter() {
-            add_button(tool.label(), tool);
-        }
-    });
+struct CommandEvent {
+    command: Command,
 }
 
 fn handle_command_events(
     mut event_reader: EventReader<CommandEvent>,
     mut commands: Commands,
-    mut query: Query<Entity, With<Placing>>,
+    mut placing_query: Query<Entity, With<Placing>>,
+    mut scaling_query: Query<Entity, With<Scaling>>,
 ) {
     for event in event_reader.iter() {
-        match event.0 {
-            Place => {
-                for entity in &mut query {
+        match event.command {
+            Created { position } => {
+                for entity in &mut placing_query {
                     commands
                         .entity(entity)
                         .remove::<Placing>()
-                        .insert(RigidBody::Dynamic)
+                        .insert(Scaling {
+                            start: position.extend(0.),
+                        });
+                    // .insert(RigidBody::Dynamic)
+                    // .insert(GravityScale(0.0))
+                    // .insert(Velocity::default())
+                    // // .insert(ActiveCollisionTypes::KINEMATIC_KINEMATIC)
+                    // .insert(Collider::cuboid(0.5, 0.5));
+                }
+                commands.insert_resource(Mode::Scaling);
+            }
+            Scaled => {
+                for entity in &mut scaling_query {
+                    commands
+                        .entity(entity)
+                        .remove::<Scaling>()
+                        .insert(RigidBody::KinematicVelocityBased)
                         .insert(GravityScale(0.0))
                         .insert(Velocity::default())
-                        // .insert(ActiveCollisionTypes::KINEMATIC_KINEMATIC)
                         .insert(Collider::cuboid(0.5, 0.5));
                 }
-                commands.insert_resource(State::Default);
+                commands.insert_resource(Mode::Default);
             }
+            _ => {}
         }
     }
 }
 
-// const VERTEX_COLORS: [[Color; 4]; 3] = [
-//     [Color::CYAN, Color::WHITE, Color::FUCHSIA, Color::BLUE],
-//     [Color::GREEN, Color::YELLOW, Color::WHITE, Color::CYAN],
-//     [Color::WHITE, Color::YELLOW, Color::RED, Color::FUCHSIA],
-// ];
-
-const VERTEX_COLORS: [[Color; 4]; 4] = [
-    [Color::RED, Color::WHITE, Color::GREEN, Color::BLUE],
-    [Color::YELLOW, Color::WHITE, Color::PURPLE, Color::RED],
-    [Color::ORANGE, Color::BLUE, Color::WHITE, Color::YELLOW],
-    [Color::PURPLE, Color::YELLOW, Color::WHITE, Color::BLUE],
-];
-
 fn handle_tool_events(
-    mut event_reader: EventReader<ToolEvent>,
-    mut commands: Commands,
-    state: Res<State>,
+    mode: Res<Mode>,
     meshes: Res<Meshes>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    mut event_reader: EventReader<ToolEvent>,
+    mut commands: Commands,
 ) {
     for event in event_reader.iter() {
-        match *state {
-            State::Default => match event.0 {
+        match *mode {
+            Mode::Default => match event.tool {
                 Tool::Box => {
                     let material = materials.add(ColorMaterial::default());
 
@@ -443,13 +450,11 @@ fn handle_tool_events(
                         MaterialMesh2dBundle {
                             mesh: meshes.get_random(),
                             material,
+                            transform: Transform::default().with_scale(Vec3::splat(10.)),
                             ..default()
                         },
                     ));
-                    commands.insert_resource(State::Placing);
-                }
-                Tool::Delete => {
-                    commands.insert_resource(State::Selecting(SelectAction::Delete));
+                    commands.insert_resource(Mode::Create);
                 }
                 Tool::ForceField => {
                     commands.spawn((
@@ -462,17 +467,9 @@ fn handle_tool_events(
                             ..default()
                         },
                     ));
-                    commands.insert_resource(State::Placing);
+                    commands.insert_resource(Mode::Create);
                 }
-                Tool::Move => {
-                    commands.insert_resource(State::Selecting(SelectAction::Move));
-                }
-                Tool::Rotate => {
-                    commands.insert_resource(State::Selecting(SelectAction::Rotate));
-                }
-                Tool::Scale => {
-                    commands.insert_resource(State::Selecting(SelectAction::Scale));
-                }
+                _ => {}
             },
             _ => {}
         }
@@ -481,17 +478,15 @@ fn handle_tool_events(
 
 fn handle_input(
     mut commands: Commands,
-    state: Res<State>,
+    mode: Res<Mode>,
     keyboard_input: Res<Input<KeyCode>>,
     mut event_sender: EventWriter<ToolEvent>,
     placing_query: Query<Entity, With<Placing>>,
 ) {
     if keyboard_input.just_pressed(KeyCode::Escape) {
-        match *state {
-            State::Default => {}
+        match *mode {
+            Mode::Default => {}
             _ => {
-                commands.insert_resource(State::Default);
-
                 if let Ok(entity) = placing_query.get_single() {
                     commands.entity(entity).despawn();
                 }
@@ -500,7 +495,7 @@ fn handle_input(
     }
     for tool in Tool::iter() {
         if keyboard_input.just_pressed(tool.key()) {
-            event_sender.send(ToolEvent(tool));
+            event_sender.send(ToolEvent { tool });
         }
     }
 }
