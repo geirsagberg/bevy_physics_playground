@@ -15,6 +15,7 @@ use Command::Created;
 use Command::Scaled;
 use textures::Meshes;
 
+use crate::balls::Ball;
 use crate::Command::{Move, Rotate};
 
 mod perlin;
@@ -55,15 +56,16 @@ fn main() {
         .add_system(set_hover.after(calculate_mouse_position))
         .add_system(highlight_hover.after(set_hover))
         .add_system(balls::spawn_balls.run_if(on_timer(Duration::from_secs_f32(0.01))))
-        .add_system(balls::despawn_outside_world)
+        .add_system(balls::despawn_outside_world.in_base_set(CoreSet::PostUpdate))
         .add_system(toggle_debug_rendering)
         .add_system(handle_tool_events)
         .add_system(handle_command_events)
-        .add_system(handle_input)
+        .add_system(handle_input.in_base_set(CoreSet::PostUpdate))
         .add_system(scale)
         .add_system(rotate)
         .add_system(move_towards_mouse.after(calculate_mouse_position))
         .add_system(move_to_mouse.after(calculate_mouse_position))
+        .add_system(apply_force_field)
         .run();
 }
 
@@ -83,6 +85,9 @@ enum HoverPosition {
 struct Hoverable {
     position: Option<HoverPosition>,
 }
+
+#[derive(Component)]
+struct OriginalColor(Color);
 
 fn set_hover(
     mut query: Query<(&mut Hoverable, Entity, &GlobalTransform), With<Collider>>,
@@ -131,48 +136,55 @@ fn set_hover(
 }
 
 fn highlight_hover(
-    mut query: Query<(&Hoverable, &Handle<ColorMaterial>, Option<&Modifying>)>,
+    mut query: Query<(&Hoverable, Option<&Handle<ColorMaterial>>, Option<&mut Sprite>, Option<&Modifying>, Option<&OriginalColor>)>,
     mut color_mterials: ResMut<Assets<ColorMaterial>>,
     mode: Res<Mode>,
     mut egui_contexts: EguiContexts,
 ) {
     let ctx = egui_contexts.ctx_mut();
-    for (hoverable, material, modifying) in &mut query {
-        let material = color_mterials.get_mut(material).unwrap();
-        if *mode == Mode::Default {
+    for (hoverable, material, sprite, modifying, original_color) in &mut query {
+        let fallback_color = original_color.map(|c| c.0).unwrap_or(Color::WHITE);
+        let color: Option<Color> = if *mode == Mode::Default {
             match hoverable.position {
                 Some(HoverPosition::Center) => {
                     ctx.set_cursor_icon(egui::CursorIcon::Grab);
-                    material.color = Color::rgb(0.9, 0.9, 0.9);
+                    Some(fallback_color.with_a(0.9))
                 }
                 Some(HoverPosition::Edge) => {
                     ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
-                    material.color = Color::rgb(0.9, 0.9, 0.9);
+                    Some(fallback_color.with_a(0.9))
                 }
                 Some(HoverPosition::Corner) => {
                     ctx.set_cursor_icon(egui::CursorIcon::ResizeSouthEast);
-                    material.color = Color::rgb(0.9, 0.9, 0.9);
+                    Some(fallback_color.with_a(0.9))
                 }
                 None => {
-                    material.color = Color::WHITE;
+                    None
                 }
             }
         } else if *mode == Mode::Modify {
             match modifying {
                 Some(Modifying::Moving { .. }) => {
                     ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-                    material.color = Color::rgb(0.9, 0.9, 0.9);
+                    Some(fallback_color.with_a(0.9))
                 }
                 Some(Modifying::Rotating { .. }) => {
                     ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
-                    material.color = Color::rgb(0.9, 0.9, 0.9);
+                    Some(fallback_color.with_a(0.9))
                 }
                 _ => {
-                    material.color = Color::WHITE;
+                    None
                 }
             }
         } else {
-            material.color = Color::WHITE;
+            None
+        };
+        let color = color.unwrap_or(original_color.map(|c| c.0).unwrap_or(Color::WHITE));
+        if let Some(material) = material {
+            color_mterials.get_mut(material).unwrap().color = color;
+        }
+        if let Some(mut sprite) = sprite {
+            sprite.color = color;
         }
     }
 }
@@ -205,9 +217,6 @@ pub enum Modifying {
     Moving { start: Vec2 },
     Rotating { start: Vec2 },
 }
-
-#[derive(Component)]
-struct ForceField;
 
 fn calculate_mouse_position(
     camera_query: Query<(&GlobalTransform, &Camera)>,
@@ -350,15 +359,49 @@ struct CommandEvent {
     command: Command,
 }
 
+fn apply_force_field(
+    rapier_context: Res<RapierContext>,
+    query: Query<(&GlobalTransform, &Solid, &Collider)>,
+    balls_query: Query<(Entity), With<Ball>>,
+    mut commands: Commands,
+) {
+    for (entity) in &balls_query {
+        commands.entity(entity).insert(ExternalForce {
+            force: Vec2::new(0.0, 0.0),
+            ..default()
+        });
+    }
+
+    for (transform, solid, collider) in &query {
+        if let Solid::ForceField { force } = solid {
+            let (_, rotation, translation) = transform.to_scale_rotation_translation();
+            let z_rotation = rotation.z;
+            let rotated_force = Vec2::new(
+                force.x * z_rotation.cos() - force.y * z_rotation.sin(),
+                force.x * z_rotation.sin() + force.y * z_rotation.cos(),
+            );
+            rapier_context.intersections_with_shape(translation.truncate(), rotation.z * 2., collider, QueryFilter::default(), |entity| {
+                commands.get_entity(entity).map(|mut commands| {
+                    commands.insert(ExternalForce {
+                        force: rotated_force,
+                        ..default()
+                    });
+                });
+                true
+            });
+        }
+    }
+}
+
 fn handle_command_events(
     mut event_reader: EventReader<CommandEvent>,
     mut commands: Commands,
-    mut query: Query<Entity, With<Modifying>>,
+    query: Query<(Entity, &Solid), With<Modifying>>,
 ) {
     for event in event_reader.iter() {
         match event.command {
             Created { position } => {
-                for entity in &mut query {
+                for (entity, _) in &query {
                     commands
                         .entity(entity)
                         .insert(Modifying::Scaling {
@@ -368,14 +411,21 @@ fn handle_command_events(
                 commands.insert_resource(Mode::Modify);
             }
             Scaled => {
-                for entity in &mut query {
-                    commands
-                        .entity(entity)
+                for (entity, solid) in &query {
+                    commands.entity(entity)
                         .remove::<Modifying>()
-                        .insert(RigidBody::KinematicVelocityBased)
-                        .insert(GravityScale(0.0))
                         .insert(Velocity::default())
                         .insert(Collider::cuboid(0.5, 0.5));
+
+                    match solid {
+                        Solid::Box => {
+                            commands.entity(entity).insert(RigidBody::KinematicVelocityBased);
+                        }
+                        Solid::ForceField { .. } => {
+                            commands.entity(entity).insert(RigidBody::KinematicVelocityBased);
+                            commands.entity(entity).insert(Sensor);
+                        }
+                    }
                 }
                 commands.insert_resource(Mode::Default);
             }
@@ -399,6 +449,14 @@ fn handle_command_events(
     }
 }
 
+#[derive(Component)]
+enum Solid {
+    Box,
+    ForceField {
+        force: Vec2,
+    },
+}
+
 fn handle_tool_events(
     mode: Res<Mode>,
     meshes: Res<Meshes>,
@@ -414,6 +472,7 @@ fn handle_tool_events(
                     let material = materials.add(ColorMaterial::default());
 
                     commands.spawn((
+                        Solid::Box,
                         Hoverable::default(),
                         Modifying::Placing,
                         MaterialMesh2dBundle {
@@ -427,16 +486,24 @@ fn handle_tool_events(
                     commands.insert_resource(Mode::Create);
                 }
                 Tool::ForceField => {
+                    let color = Color::rgba(0.0, 0.0, 1.0, 0.1);
                     commands.spawn((
+                        Solid::ForceField {
+                            force: Vec2::new(0.0, 0.5),
+                        },
+                        OriginalColor(color),
+                        Hoverable::default(),
                         Modifying::Placing,
                         SpriteBundle {
                             sprite: Sprite {
-                                color: Color::GRAY,
+                                color,
                                 ..default()
                             },
+                            transform: Transform::from_xyz(0.0, 0.0, z_counter.0).with_scale(Vec3::splat(10.)),
                             ..default()
                         },
                     ));
+                    z_counter.0 += 0.01;
                     commands.insert_resource(Mode::Create);
                 }
             },
@@ -455,6 +522,7 @@ fn handle_input(
         for entity in &query {
             commands.entity(entity).despawn();
         }
+        commands.insert_resource(Mode::Default);
     }
     for tool in Tool::iter() {
         if keyboard_input.just_pressed(tool.key()) {

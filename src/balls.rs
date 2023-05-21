@@ -1,5 +1,5 @@
 use bevy::math::Vec2;
-use bevy::prelude::{Color, Commands, default, Entity, Query, Sprite, SpriteBundle, Transform, Window, Without};
+use bevy::prelude::*;
 use bevy_rapier2d::dynamics::{Ccd, RigidBody};
 use bevy_rapier2d::geometry::Collider;
 use rand::random;
@@ -17,11 +17,16 @@ pub fn despawn_outside_world(
                 || transform.translation.x < -window.resolution.width()
                 || transform.translation.x > window.resolution.width()
                 || transform.translation.y > window.resolution.height() {
-                commands.entity(entity).despawn();
+                commands.get_entity(entity).map(|mut entity|  {
+                    entity.despawn();
+                });
             }
         }
     }
 }
+
+#[derive(Component)]
+pub struct Ball;
 
 pub fn spawn_balls(mut commands: Commands, window_query: Query<&Window>) {
     let resolution = match window_query.get_single() {
@@ -38,6 +43,7 @@ pub fn spawn_balls(mut commands: Commands, window_query: Query<&Window>) {
     commands.spawn((
         RigidBody::Dynamic,
         Collider::ball(half),
+        Ball,
         Ccd::enabled(),
         SpriteBundle {
             transform: Transform {
