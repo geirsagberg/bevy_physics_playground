@@ -1,13 +1,14 @@
-use bevy::prelude::{Color, Commands, default, Entity, Query, Sprite, SpriteBundle, Transform, Window, Without};
 use bevy::math::Vec2;
-use rand::random;
+use bevy::prelude::{Color, Commands, default, Entity, Query, Sprite, SpriteBundle, Transform, Window, Without};
 use bevy_rapier2d::dynamics::{Ccd, RigidBody};
 use bevy_rapier2d::geometry::Collider;
-use crate::Placing;
+use rand::random;
+
+use crate::Modifying;
 
 pub fn despawn_outside_world(
     mut commands: Commands,
-    query: Query<(Entity, &Transform), Without<Placing>>,
+    query: Query<(Entity, &Transform), Without<Modifying>>,
     window_query: Query<&Window>,
 ) {
     if let Ok(window) = window_query.get_single() {

@@ -1,7 +1,8 @@
-use bevy_egui::{egui, EguiContexts};
 use bevy::prelude::{EventWriter, Res};
+use bevy_egui::EguiContexts;
 use bevy_egui::egui::Window;
 use strum::IntoEnumIterator;
+
 use crate::{Mode, Tool, ToolEvent};
 
 pub(crate) fn update_ui(
