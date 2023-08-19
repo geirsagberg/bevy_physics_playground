@@ -56,11 +56,11 @@ fn main() {
         .add_system(set_hover.after(calculate_mouse_position))
         .add_system(highlight_hover.after(set_hover))
         .add_system(balls::spawn_balls.run_if(on_timer(Duration::from_secs_f32(0.01))))
-        .add_system(balls::despawn_outside_world.in_base_set(CoreSet::PostUpdate))
+        .add_systems(PostUpdate, balls::despawn_outside_world)
         .add_system(toggle_debug_rendering)
         .add_system(handle_tool_events)
         .add_system(handle_command_events)
-        .add_system(handle_input.in_base_set(CoreSet::PostUpdate))
+        .add_systems(PostUpdate, handle_input)
         .add_system(scale)
         .add_system(rotate)
         .add_system(move_towards_mouse.after(calculate_mouse_position))
@@ -344,6 +344,7 @@ impl Tool {
     }
 }
 
+#[derive(Event)]
 struct ToolEvent {
     tool: Tool,
 }
@@ -355,6 +356,7 @@ enum Command {
     Rotate { entity: Entity, start: Vec2 },
 }
 
+#[derive(Event)]
 struct CommandEvent {
     command: Command,
 }
