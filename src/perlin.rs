@@ -5,7 +5,7 @@ use perlin_noise::PerlinNoise;
 
 const TEXTURE_SIZE: u32 = 512;
 
-fn create_perlin_image() -> Image {
+pub fn create_perlin_image() -> Image {
     let perlin = PerlinNoise::new();
     let mut pixels = Vec::with_capacity((TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize);
     for y in 0..TEXTURE_SIZE {

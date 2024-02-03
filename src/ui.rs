@@ -1,11 +1,11 @@
 use bevy::prelude::{EventWriter, Res};
-use bevy_egui::EguiContexts;
 use bevy_egui::egui::Window;
+use bevy_egui::EguiContexts;
 use strum::IntoEnumIterator;
 
 use crate::{Mode, Tool, ToolEvent};
 
-pub(crate) fn update_ui(
+pub fn update_ui(
     mut egui_contexts: EguiContexts,
     mode: Res<Mode>,
     mut event_sender: EventWriter<ToolEvent>,
@@ -18,13 +18,10 @@ pub(crate) fn update_ui(
         let mut add_button = |label: &str, tool: Tool| {
             ui.add_enabled_ui(*mode == Mode::Default, |ui| {
                 if ui.button(label).clicked() {
-                    event_sender.send(ToolEvent {
-                        tool
-                    });
+                    event_sender.send(ToolEvent { tool });
                 }
             });
         };
-
 
         for tool in Tool::iter() {
             add_button(tool.label(), tool);

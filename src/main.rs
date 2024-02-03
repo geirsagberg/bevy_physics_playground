@@ -249,7 +249,7 @@ fn move_towards_mouse(
     mouse: Res<Mouse>,
 ) {
     for (mut velocity, transform, modifying) in &mut query {
-        if let Modifying::Moving { start } = *modifying {
+        if let Modifying::Moving { start: _ } = *modifying {
             let translation = transform.translation().truncate();
             velocity.linvel = (mouse.position - translation) * 10.;
         }
@@ -318,7 +318,7 @@ fn scale(mut query: Query<(&mut Transform, &Modifying)>, mouse: Res<Mouse>) {
 fn rotate(mouse: Res<Mouse>, mut query: Query<(&mut Transform, &Modifying)>) {
     let position = mouse.position;
     for (mut transform, modifying) in &mut query {
-        if let Modifying::Rotating { start } = modifying {
+        if let Modifying::Rotating { start: _ } = modifying {
             transform.rotation = Quat::from_rotation_z(
                 -(position - transform.translation.truncate()).angle_between(Vec2::new(1.0, 0.0)),
             );
@@ -410,7 +410,7 @@ fn handle_command_events(
     mut commands: Commands,
     query: Query<(Entity, &Solid), With<Modifying>>,
 ) {
-    for event in event_reader.iter() {
+    for event in event_reader.read() {
         match event.command {
             Created { position } => {
                 for (entity, _) in &query {
@@ -472,7 +472,7 @@ fn handle_tool_events(
     mut commands: Commands,
     mut z_counter: ResMut<ZCounter>,
 ) {
-    for event in event_reader.iter() {
+    for event in event_reader.read() {
         match *mode {
             Mode::Default => match event.tool {
                 Tool::Box => {
