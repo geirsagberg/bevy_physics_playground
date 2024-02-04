@@ -2,10 +2,12 @@
 
 use std::time::Duration;
 
+use bevy::gizmos;
 use bevy::sprite::MaterialMesh2dBundle;
 use bevy::utils::HashSet;
 use bevy::{prelude::*, time::common_conditions::on_timer};
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
+use bevy_inspector_egui::quick::ResourceInspectorPlugin;
 use bevy_rapier2d::prelude::*;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
@@ -30,6 +32,8 @@ struct ZCounter(f32);
 impl Plugin for MainPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(ClearColor(Color::BLACK))
+            .init_resource::<DebugInfo>()
+            .register_type::<DebugInfo>()
             .insert_resource(Mode::Default)
             .insert_resource(ZCounter::default())
             .insert_resource(Mouse::default());
@@ -41,7 +45,7 @@ fn main() {
         .add_plugins(DefaultPlugins)
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(100.))
         .add_plugins(RapierDebugRenderPlugin::default().disabled())
-        .add_plugins(EguiPlugin)
+        .add_plugins(ResourceInspectorPlugin::<DebugInfo>::default())
         .add_plugins(MainPlugin)
         .add_systems(Startup, setup_camera)
         .add_systems(Startup, textures::generate_textures)
@@ -365,11 +369,21 @@ struct CommandEvent {
     command: Command,
 }
 
+#[derive(Reflect, Resource, Default)]
+#[reflect(Resource)]
+pub struct DebugInfo {
+    rotation: Quat,
+    rotation_z: f32,
+    transform: Transform,
+}
+
 fn apply_force_field(
     rapier_context: Res<RapierContext>,
     query: Query<(&GlobalTransform, &Solid, &Collider)>,
     balls_query: Query<(Entity), With<Ball>>,
     mut commands: Commands,
+    mut gizmos: Gizmos,
+    mut debug_info: ResMut<DebugInfo>,
 ) {
     for (entity) in &balls_query {
         commands.entity(entity).insert(ExternalForce {
@@ -381,14 +395,18 @@ fn apply_force_field(
     for (transform, solid, collider) in &query {
         if let Solid::ForceField { force } = solid {
             let (_, rotation, translation) = transform.to_scale_rotation_translation();
-            let z_rotation = rotation.z;
+            let z_rotation = rotation.to_euler(EulerRot::ZYX).0;
             let rotated_force = Vec2::new(
                 force.x * z_rotation.cos() - force.y * z_rotation.sin(),
                 force.x * z_rotation.sin() + force.y * z_rotation.cos(),
             );
+            debug_info.transform = transform.compute_transform();
+            debug_info.rotation = rotation;
+            debug_info.rotation_z = z_rotation;
+            gizmos.ray_2d(translation.truncate(), rotated_force * 100.0, Color::RED);
             rapier_context.intersections_with_shape(
                 translation.truncate(),
-                rotation.z * 2.,
+                z_rotation,
                 collider,
                 QueryFilter::default(),
                 |entity| {
