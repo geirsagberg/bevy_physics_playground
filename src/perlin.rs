@@ -1,6 +1,7 @@
+use bevy::asset::RenderAssetUsages;
+use bevy::image::BevyDefault;
 use bevy::prelude::{default, Image};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::render::texture::BevyDefault;
 use perlin_noise::PerlinNoise;
 
 const TEXTURE_SIZE: u32 = 512;
@@ -27,5 +28,6 @@ pub fn create_perlin_image() -> Image {
         TextureDimension::D2,
         pixels,
         TextureFormat::bevy_default(),
+        RenderAssetUsages::RENDER_WORLD,
     )
 }

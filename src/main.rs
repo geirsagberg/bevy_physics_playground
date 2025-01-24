@@ -2,11 +2,9 @@
 
 use std::time::Duration;
 
-use bevy::gizmos;
-use bevy::sprite::MaterialMesh2dBundle;
 use bevy::utils::HashSet;
 use bevy::{prelude::*, time::common_conditions::on_timer};
-use bevy_egui::{egui, EguiContexts, EguiPlugin};
+use bevy_egui::{egui, EguiContexts};
 use bevy_inspector_egui::quick::ResourceInspectorPlugin;
 use bevy_rapier2d::prelude::*;
 use strum::IntoEnumIterator;
@@ -95,16 +93,18 @@ struct OriginalColor(Color);
 
 fn set_hover(
     mut query: Query<(&mut Hoverable, Entity, &GlobalTransform), With<Collider>>,
-    rapier_context: Res<RapierContext>,
+    rapier_context: Query<&RapierContext>,
     mouse: Res<Mouse>,
 ) {
     let mut entities = HashSet::new();
     let position = mouse.position;
 
-    rapier_context.intersections_with_point(position, QueryFilter::default(), |entity| {
-        entities.insert(entity);
-        true
-    });
+    rapier_context
+        .single()
+        .intersections_with_point(position, QueryFilter::default(), |entity| {
+            entities.insert(entity);
+            true
+        });
 
     // Find entity with highest z value
     let mut highest_entity: Option<Entity> = None;
@@ -142,7 +142,7 @@ fn set_hover(
 fn highlight_hover(
     mut query: Query<(
         &Hoverable,
-        Option<&Handle<ColorMaterial>>,
+        Option<&MeshMaterial2d<ColorMaterial>>,
         Option<&mut Sprite>,
         Option<&Modifying>,
         Option<&OriginalColor>,
@@ -158,15 +158,15 @@ fn highlight_hover(
             match hoverable.position {
                 Some(HoverPosition::Center) => {
                     ctx.set_cursor_icon(egui::CursorIcon::Grab);
-                    Some(fallback_color.with_a(0.9))
+                    Some(fallback_color.with_alpha(0.9))
                 }
                 Some(HoverPosition::Edge) => {
                     ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
-                    Some(fallback_color.with_a(0.9))
+                    Some(fallback_color.with_alpha(0.9))
                 }
                 Some(HoverPosition::Corner) => {
                     ctx.set_cursor_icon(egui::CursorIcon::ResizeSouthEast);
-                    Some(fallback_color.with_a(0.9))
+                    Some(fallback_color.with_alpha(0.9))
                 }
                 None => None,
             }
@@ -174,11 +174,11 @@ fn highlight_hover(
             match modifying {
                 Some(Modifying::Moving { .. }) => {
                     ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-                    Some(fallback_color.with_a(0.9))
+                    Some(fallback_color.with_alpha(0.9))
                 }
                 Some(Modifying::Rotating { .. }) => {
                     ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
-                    Some(fallback_color.with_a(0.9))
+                    Some(fallback_color.with_alpha(0.9))
                 }
                 _ => None,
             }
@@ -197,7 +197,7 @@ fn highlight_hover(
 
 fn toggle_debug_rendering(
     mut debug_render_context: ResMut<DebugRenderContext>,
-    keyboard_input: Res<Input<KeyCode>>,
+    keyboard_input: Res<ButtonInput<KeyCode>>,
 ) {
     if keyboard_input.just_pressed(KeyCode::F1) {
         debug_render_context.enabled = !debug_render_context.enabled;
@@ -205,7 +205,7 @@ fn toggle_debug_rendering(
 }
 
 fn setup_camera(mut commands: Commands) {
-    commands.spawn(Camera2dBundle::default());
+    commands.spawn(Camera2d::default());
 }
 
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
@@ -233,7 +233,7 @@ fn calculate_mouse_position(
 
     let position = window
         .cursor_position()
-        .and_then(|cursor| camera.viewport_to_world_2d(camera_transform, cursor))
+        .and_then(|cursor| camera.viewport_to_world_2d(camera_transform, cursor).ok())
         .unwrap_or_default();
 
     mouse.position = position;
@@ -261,7 +261,7 @@ fn move_towards_mouse(
 }
 
 fn handle_left_click(
-    mouse_input: Res<Input<MouseButton>>,
+    mouse_input: Res<ButtonInput<MouseButton>>,
     mode: Res<Mode>,
     mouse: Res<Mouse>,
     mut event_writer: EventWriter<CommandEvent>,
@@ -324,7 +324,7 @@ fn rotate(mouse: Res<Mouse>, mut query: Query<(&mut Transform, &Modifying)>) {
     for (mut transform, modifying) in &mut query {
         if let Modifying::Rotating { start: _ } = modifying {
             transform.rotation = Quat::from_rotation_z(
-                -(position - transform.translation.truncate()).angle_between(Vec2::new(1.0, 0.0)),
+                -(position - transform.translation.truncate()).angle_to(Vec2::new(1.0, 0.0)),
             );
         }
     }
@@ -339,8 +339,8 @@ enum Tool {
 impl Tool {
     fn key(&self) -> KeyCode {
         match self {
-            Tool::Box => KeyCode::B,
-            Tool::ForceField => KeyCode::F,
+            Tool::Box => KeyCode::KeyB,
+            Tool::ForceField => KeyCode::KeyF,
         }
     }
 
@@ -378,7 +378,7 @@ pub struct DebugInfo {
 }
 
 fn apply_force_field(
-    rapier_context: Res<RapierContext>,
+    rapier_context: ReadDefaultRapierContext,
     query: Query<(&GlobalTransform, &Solid, &Collider)>,
     balls_query: Query<(Entity), With<Ball>>,
     mut commands: Commands,
@@ -403,7 +403,7 @@ fn apply_force_field(
             debug_info.transform = transform.compute_transform();
             debug_info.rotation = rotation;
             debug_info.rotation_z = z_rotation;
-            gizmos.ray_2d(translation.truncate(), rotated_force * 100.0, Color::RED);
+            gizmos.ray_2d(translation.truncate(), rotated_force * 100.0, Color::WHITE);
             rapier_context.intersections_with_shape(
                 translation.truncate(),
                 z_rotation,
@@ -500,19 +500,15 @@ fn handle_tool_events(
                         Solid::Box,
                         Hoverable::default(),
                         Modifying::Placing,
-                        MaterialMesh2dBundle {
-                            mesh: meshes.get_random(),
-                            material,
-                            transform: Transform::from_xyz(0.0, 0.0, z_counter.0)
-                                .with_scale(Vec3::splat(10.)),
-                            ..default()
-                        },
+                        meshes.get_random(),
+                        MeshMaterial2d(material),
+                        Transform::from_xyz(0.0, 0.0, z_counter.0).with_scale(Vec3::splat(10.)),
                     ));
                     z_counter.0 += 0.01;
                     commands.insert_resource(Mode::Create);
                 }
                 Tool::ForceField => {
-                    let color = Color::rgba(0.0, 0.0, 1.0, 0.1);
+                    let color = Color::srgba(0.0, 0.0, 1.0, 0.1);
                     commands.spawn((
                         Solid::ForceField {
                             force: Vec2::new(0.0, 0.5),
@@ -520,12 +516,8 @@ fn handle_tool_events(
                         OriginalColor(color),
                         Hoverable::default(),
                         Modifying::Placing,
-                        SpriteBundle {
-                            sprite: Sprite { color, ..default() },
-                            transform: Transform::from_xyz(0.0, 0.0, z_counter.0)
-                                .with_scale(Vec3::splat(10.)),
-                            ..default()
-                        },
+                        Sprite { color, ..default() },
+                        Transform::from_xyz(0.0, 0.0, z_counter.0).with_scale(Vec3::splat(10.)),
                     ));
                     z_counter.0 += 0.01;
                     commands.insert_resource(Mode::Create);
@@ -538,7 +530,7 @@ fn handle_tool_events(
 
 fn handle_input(
     mut commands: Commands,
-    keyboard_input: Res<Input<KeyCode>>,
+    keyboard_input: Res<ButtonInput<KeyCode>>,
     mut event_sender: EventWriter<ToolEvent>,
     query: Query<Entity, With<Modifying>>,
 ) {

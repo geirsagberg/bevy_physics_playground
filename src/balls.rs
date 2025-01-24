@@ -16,8 +16,9 @@ pub fn despawn_outside_world(
             if transform.translation.y < -window.resolution.height()
                 || transform.translation.x < -window.resolution.width()
                 || transform.translation.x > window.resolution.width()
-                || transform.translation.y > window.resolution.height() {
-                commands.get_entity(entity).map(|mut entity|  {
+                || transform.translation.y > window.resolution.height()
+            {
+                commands.get_entity(entity).map(|mut entity| {
                     entity.despawn();
                 });
             }
@@ -38,23 +39,20 @@ pub fn spawn_balls(mut commands: Commands, window_query: Query<&Window>) {
 
     let rand_position = Vec2::new(width * (random::<f32>() - 0.5), height * 0.5 + 100.);
     let half = 1.;
-    let random_color = Color::rgb(random(), random(), random());
+    let random_color = Color::srgb(random(), random(), random());
 
     commands.spawn((
         RigidBody::Dynamic,
         Collider::ball(half),
         Ball,
         Ccd::enabled(),
-        SpriteBundle {
-            transform: Transform {
-                translation: rand_position.extend(0.),
-                ..default()
-            },
-            sprite: Sprite {
-                color: random_color,
-                custom_size: Some(Vec2::new(half * 2., half * 2.)),
-                ..default()
-            },
+        Transform {
+            translation: rand_position.extend(0.),
+            ..default()
+        },
+        Sprite {
+            color: random_color,
+            custom_size: Some(Vec2::new(half * 2., half * 2.)),
             ..default()
         },
     ));
